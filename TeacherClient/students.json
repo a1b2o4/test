@@ -1,0 +1,32 @@
+[
+    {
+        "groupId": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+        "hash": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
+        "name": "123"
+    },
+    {
+        "groupId": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+        "hash": "833273e0f6064789d936fd8f46584ab2a3856fb4b7f5fb95d8746922125a66b0",
+        "name": "Сидоров Сидор Сидорович"
+    },
+    {
+        "groupId": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+        "hash": "b074c696d195dc574a8b3e707e2e97c33f106f5b0f4d3e9efdc93cb4b060b676",
+        "name": "ф и о"
+    },
+    {
+        "groupId": "fdae89b2-5684-498f-a85a-d463db722dca",
+        "hash": "bf5c441226e6c70186bb8cc733f8cb0366810258ca669e58a4bb8517e90870e7",
+        "name": "Петров Петр Петрович"
+    },
+    {
+        "groupId": "fdae89b2-5684-498f-a85a-d463db722dca",
+        "hash": "80b2a51a94a721528d0c4c77a597f933bab6f1dce091ff0afa3e7e05a2279b04",
+        "name": "Иванов Иван Иванович"
+    },
+    {
+        "groupId": "fdae89b2-5684-498f-a85a-d463db722dca",
+        "hash": "82a3537ff0dbce7eec35d69edc3a189ee6f17d82f353a553f9aa96cb0be3ce89",
+        "name": "name"
+    }
+]

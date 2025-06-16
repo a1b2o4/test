@@ -1,0 +1,2161 @@
+// groupsdialog.cpp
+#include "groupsdialog.h"
+#include <QListWidget>
+#include <QTableWidget>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QFileDialog>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QFile>
+#include <QTextStream>
+#include <QMessageBox>
+#include <QCryptographicHash>
+
+GroupsDialog::GroupsDialog(QWidget* parent)
+    : QDialog(parent)
+{
+    setupUi();
+
+    connect(addGroupBtn,        &QPushButton::clicked, this, &GroupsDialog::onAddGroup);
+    connect(groupsList,         &QListWidget::currentTextChanged, this, &GroupsDialog::onGroupChanged);
+    connect(addStudentBtn,      &QPushButton::clicked, this, &GroupsDialog::onAddStudent);
+    connect(importStudentsBtn,  &QPushButton::clicked, this, &GroupsDialog::onImportStudents);
+    connect(assignBtn,          &QPushButton::clicked, this, &GroupsDialog::onAssignToGroup);
+    connect(removeBtn,          &QPushButton::clicked, this, &GroupsDialog::onRemoveFromGroup);
+    connect(applyBtn,           &QPushButton::clicked, this, &GroupsDialog::onApply);
+    connect(cancelBtn,          &QPushButton::clicked, this, &GroupsDialog::onCancel);
+
+    assignedTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    assignedTable->setSelectionMode(QAbstractItemView::MultiSelection);
+    unassignedTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    unassignedTable->setSelectionMode(QAbstractItemView::MultiSelection);
+
+    connect(this, &GroupsDialog::addStudents, this, [this](const QStringList& names) {
+        QString gid = selectedGroupId();
+        if (gid.isEmpty()) {
+            QMessageBox::warning(this, tr("Группа не выбрана"), tr("Сначала выберите группу."));
+            return;
+        }
+
+        for (const QString& name : names) {
+            QByteArray b = name.toUtf8();
+            QString hash = QCryptographicHash::hash(b, QCryptographicHash::Sha256).toHex();
+
+            if (!studentNameMap.contains(hash)) {
+                studentNameMap[hash] = name;
+                studentGroupMap[hash] = gid;  // сразу в выбранную группу
+            }
+        }
+
+        saveStudentAssignments();
+        refreshTables();
+    });
+}
+
+GroupsDialog::~GroupsDialog() = default;
+
+void GroupsDialog::setupUi()
+{
+    groupsList        = new QListWidget;
+    assignedTable     = new QTableWidget(0, 1);
+    unassignedTable   = new QTableWidget(0, 1);
+    addGroupBtn       = new QPushButton(tr("Добавить группу"));
+    addStudentBtn     = new QPushButton(tr("Добавить студента"));
+    importStudentsBtn = new QPushButton(tr("Загрузить из файла"));
+    assignBtn         = new QPushButton(tr("<< Добавить"));
+    removeBtn         = new QPushButton(tr("Удалить >>"));
+    applyBtn          = new QPushButton(tr("Применить"));
+    cancelBtn         = new QPushButton(tr("Отмена"));
+
+    assignedTable->setColumnCount(1);
+    assignedTable->setHorizontalHeaderLabels(QStringList{tr("Студенты в группе")});
+
+    unassignedTable->setColumnCount(1);
+    unassignedTable->setHorizontalHeaderLabels(QStringList{tr("Нераспределённые")});
+
+    auto* mainLay = new QHBoxLayout(this);
+    auto* leftLay = new QVBoxLayout;
+    auto* midLay  = new QVBoxLayout;
+    auto* rightLay= new QVBoxLayout;
+
+    leftLay->addWidget(groupsList);
+    leftLay->addWidget(addGroupBtn);
+    leftLay->addWidget(addStudentBtn);
+    leftLay->addWidget(importStudentsBtn);
+
+    midLay->addWidget(assignedTable);
+    midLay->addWidget(assignBtn);
+    midLay->addWidget(removeBtn);
+    midLay->addWidget(unassignedTable);
+
+    rightLay->addStretch();
+    rightLay->addWidget(applyBtn);
+    rightLay->addWidget(cancelBtn);
+
+    mainLay->addLayout(leftLay);
+    mainLay->addLayout(midLay);
+    mainLay->addLayout(rightLay);
+}
+
+void GroupsDialog::loadGroups()
+{
+    groups.clear();
+    groupsList->clear();
+
+    QFile f(groupsFile);
+    if (!f.open(QIODevice::ReadOnly)) return;
+    QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
+    for (const QJsonValue& v : arr) {
+        QJsonObject obj = v.toObject();
+        QString id   = obj["id"].toString();
+        QString name = obj["name"].toString();
+        groups[id] = name;
+        groupsList->addItem(name);
+    }
+}
+
+void GroupsDialog::loadStudents()
+{
+    studentGroupMap.clear();
+    studentNameMap.clear();
+
+    QFile f(studentsFile);
+    if (!f.open(QIODevice::ReadOnly)) return;
+    QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
+    for (const QJsonValue& v : arr) {
+        QJsonObject obj = v.toObject();
+        QString hash    = obj["hash"].toString();
+        QString name    = obj["name"].toString();
+        QString gid     = obj["groupId"].toString("-");
+        studentGroupMap[hash] = gid;
+        studentNameMap[hash]  = name;
+    }
+    refreshTables();
+}
+
+void GroupsDialog::saveGroups()
+{
+    QJsonArray arr;
+    for (auto it = groups.constBegin(); it != groups.constEnd(); ++it) {
+        QJsonObject o;
+        o["id"]   = it.key();
+        o["name"] = it.value();
+        arr.append(o);
+    }
+    QFile f(groupsFile);
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(QJsonDocument(arr).toJson());
+    }
+}
+
+void GroupsDialog::saveStudentAssignments()
+{
+    QJsonArray arr;
+    for (auto it = studentGroupMap.constBegin(); it != studentGroupMap.constEnd(); ++it) {
+        QJsonObject o;
+        o["hash"]    = it.key();
+        o["name"]    = studentNameMap.value(it.key());
+        o["groupId"] = it.value();
+        arr.append(o);
+    }
+    QFile f(studentsFile);
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(QJsonDocument(arr).toJson());
+    }
+}
+
+QString GroupsDialog::selectedGroupId() const
+{
+    auto* item = groupsList->currentItem();
+    if (!item) return QString();
+    QString name = item->text();
+    return groups.key(name, QString());
+}
+
+QStringList GroupsDialog::studentsInGroupNames() const
+{
+    QStringList lst;
+    QString gid = selectedGroupId();
+    for (auto it = studentGroupMap.constBegin(); it != studentGroupMap.constEnd(); ++it) {
+        if (it.value() == gid) {
+            lst << studentNameMap.value(it.key());
+        }
+    }
+    return lst;
+}
+
+void GroupsDialog::refreshTables()
+{
+    assignedTable->clearContents();
+    assignedTable->setRowCount(0);
+    unassignedTable->clearContents();
+    unassignedTable->setRowCount(0);
+
+    QString gid = selectedGroupId();
+    int a = 0, u = 0;
+    for (auto it = studentGroupMap.constBegin(); it != studentGroupMap.constEnd(); ++it) {
+        const QString& hash = it.key();
+        const QString& grp  = it.value();
+        const QString& name = studentNameMap.value(hash);
+
+        auto* item = new QTableWidgetItem(name);
+        // Хэш сохраняем, но не показываем:
+        item->setData(Qt::UserRole, hash);
+
+        if (grp == gid) {
+            assignedTable->insertRow(a);
+            assignedTable->setItem(a++, 0, item);
+            currGroupName = groups[gid];
+        } else if (grp == "-") {
+            unassignedTable->insertRow(u);
+            unassignedTable->setItem(u++, 0, item);
+        }
+    }
+}
+
+void GroupsDialog::onAddGroup()
+{
+    bool ok;
+    QString name = QInputDialog::getText(this, tr("Новая группа"),
+                                         tr("Название:"), QLineEdit::Normal, {}, &ok);
+    if (!ok || name.isEmpty()) return;
+    QByteArray b = name.toUtf8();
+    QString id = QCryptographicHash::hash(b, QCryptographicHash::Sha256).toHex();
+    groups[id] = name;
+    saveGroups();
+    loadGroups();
+}
+
+void GroupsDialog::onGroupChanged()
+{
+    refreshTables();
+}
+
+void GroupsDialog::onAddStudent()
+{
+    bool ok;
+    QString name = QInputDialog::getText(this, tr("Новый студент"),
+                                         tr("ФИО:"), QLineEdit::Normal, {}, &ok);
+    if (!ok || name.isEmpty()) return;
+    emit addStudents(QStringList{name});
+}
+
+void GroupsDialog::onImportStudents()
+{
+    QString fn = QFileDialog::getOpenFileName(this, tr("Выберите файл со студентами"),
+                                              {}, tr("Text or CSV (*.txt *.csv)"));
+    if (fn.isEmpty()) return;
+
+    QStringList names;
+    QFile f(fn);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+    QTextStream in(&f);
+    while (!in.atEnd()) {
+        QString line = in.readLine().trimmed();
+        if (!line.isEmpty())
+            names << line;
+    }
+    emit addStudents(names);
+}
+
+void GroupsDialog::onAssignToGroup()
+{
+    QString gid = selectedGroupId();
+    for (auto idx : unassignedTable->selectionModel()->selectedRows()) {
+        QString hash = unassignedTable->item(idx.row(), 0)->data(Qt::UserRole).toString();
+        studentGroupMap[hash] = gid;
+    }
+    saveStudentAssignments();
+    refreshTables();
+}
+
+void GroupsDialog::onRemoveFromGroup()
+{
+    for (auto idx : assignedTable->selectionModel()->selectedRows()) {
+        QString hash = assignedTable->item(idx.row(), 0)->data(Qt::UserRole).toString();
+        studentGroupMap[hash] = "-";
+    }
+    saveStudentAssignments();
+    refreshTables();
+}
+
+void GroupsDialog::onApply()
+{
+    //emit addStudents(studentsInGroupNames());
+    emit groupStudentNames(studentsInGroupNames(), currGroupName);
+
+    accept();
+}
+
+void GroupsDialog::onCancel()
+{
+    reject();
+}
+
+
+// groupsdialog.h
+#pragma once
+
+#include <QDialog>
+#include <QHash>
+#include <QStringList>
+
+class QListWidget;
+class QTableWidget;
+class QPushButton;
+
+class GroupsDialog : public QDialog {
+    Q_OBJECT
+
+public:
+    explicit GroupsDialog(QWidget* parent = nullptr);
+    ~GroupsDialog() override;
+
+    // Задать файлы для загрузки/сохранения
+    void setGroupsFile(const QString& path)   { groupsFile = path; }
+    void setStudentsFile(const QString& path) { studentsFile = path; }
+
+    // Загрузить из файлов (вызывать до exec())
+    void loadGroups();
+    void loadStudents();
+
+signals:
+    // При ручном добавлении студентов (в таблице или импортом)
+    void addStudents(const QStringList& studentNames);
+    // При нажатии «Применить» — список ФИО студентов выбранной группы
+    void groupStudentNames(const QStringList& names, QString group);
+
+private slots:
+    void onAddGroup();
+    void onGroupChanged();
+    void onAddStudent();
+    void onImportStudents();
+    void onAssignToGroup();
+    void onRemoveFromGroup();
+    void onApply();
+    void onCancel();
+
+private:
+    void setupUi();
+    void saveGroups();
+    void saveStudentAssignments();
+    QString selectedGroupId() const;
+    QStringList studentsInGroupNames() const;
+    void refreshTables();
+
+    QString groupsFile       = "groups.json";
+    QString studentsFile     = "students.json";
+
+    QHash<QString, QString> groups;           // groupId → groupName
+    QHash<QString, QString> studentGroupMap;  // studentHash → groupId or "-"
+    QHash<QString, QString> studentNameMap;   // studentHash → name
+
+    // UI
+    QListWidget*  groupsList       = nullptr;
+    QTableWidget* assignedTable    = nullptr;
+    QTableWidget* unassignedTable  = nullptr;
+    QPushButton*  addGroupBtn      = nullptr;
+    QPushButton*  addStudentBtn    = nullptr;
+    QPushButton*  importStudentsBtn= nullptr;
+    QPushButton*  assignBtn        = nullptr;
+    QPushButton*  removeBtn        = nullptr;
+    QPushButton*  applyBtn         = nullptr;
+    QPushButton*  cancelBtn        = nullptr;
+
+    QString currGroupName;
+
+};
+
+
+#include "teacherclient.h"
+
+#include <QApplication>
+
+int main(int argc, char *argv[])
+{
+    QApplication a(argc, argv);
+    TeacherClient w;
+    w.show();
+    return a.exec();
+}
+
+#include "settingsdialog.h"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QSpinBox>
+#include <QComboBox>
+#include <QHeaderView>
+
+#include <QCheckBox>  // Добавляем для работы с чекбоксами
+
+SettingsDialog::SettingsDialog(const QJsonArray& settings, QWidget* parent)
+    : QDialog(parent), settings(settings) {
+
+    setWindowTitle("Редактирование настроек");
+    setMinimumSize(400, 300);
+
+    tableWidget = new QTableWidget(this);
+    tableWidget->setColumnCount(2);
+    tableWidget->setHorizontalHeaderLabels({"Название", "Значение"});
+    tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableWidget->setSelectionMode(QAbstractItemView::SingleSelection);
+    tableWidget->horizontalHeader()->setStretchLastSection(true);
+    tableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    saveButton = new QPushButton("Сохранить", this);
+
+    // Заполняем таблицу
+    tableWidget->setRowCount(settings.size());
+    for (int i = 0; i < settings.size(); ++i) {
+        QJsonObject setting = settings[i].toObject();
+
+        QString name = setting["name"].toString();
+        QString type = setting["type"].toString();
+        QVariant value = setting["value"].toVariant();
+
+        // Название настройки
+        QTableWidgetItem* nameItem = new QTableWidgetItem(name);
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        tableWidget->setItem(i, 0, nameItem);
+
+        // Элемент для редактирования значения
+        if (type == "int") {
+            QSpinBox* spinBox = new QSpinBox();
+            spinBox->setMinimum(0);
+            spinBox->setMaximum(1000);
+            spinBox->setValue(value.toInt());
+            tableWidget->setCellWidget(i, 1, spinBox);
+        }
+        else if (type == "bool") {
+            QCheckBox* checkBox = new QCheckBox();
+            checkBox->setChecked(value.toBool());
+            tableWidget->setCellWidget(i, 1, checkBox);
+        }
+        else if (type == "double") {
+            QSpinBox* spinBox = new QSpinBox();
+            spinBox->setMinimum(0);
+            spinBox->setMaximum(1000);
+            spinBox->setValue(value.toDouble());
+            tableWidget->setCellWidget(i, 1, spinBox);
+        }
+        else {
+            QTableWidgetItem* valueItem = new QTableWidgetItem(value.toString());
+            tableWidget->setItem(i, 1, valueItem);
+        }
+    }
+
+    // Разметка
+    QVBoxLayout* mainLayout = new QVBoxLayout(this);
+    mainLayout->addWidget(tableWidget);
+    mainLayout->addWidget(saveButton);
+    setLayout(mainLayout);
+
+    // Сигнал на кнопку сохранения
+    connect(saveButton, &QPushButton::clicked, this, &SettingsDialog::onSaveClicked);
+}
+
+void SettingsDialog::onSaveClicked() {
+    for (int i = 0; i < settings.size(); ++i) {
+        QJsonObject setting = settings[i].toObject();
+        QString type = setting["type"].toString();
+
+        if (type == "int") {
+            QSpinBox* spinBox = qobject_cast<QSpinBox*>(tableWidget->cellWidget(i, 1));
+            if (spinBox) setting["value"] = spinBox->value();
+        }
+        else if (type == "bool") {
+            QCheckBox* checkBox = qobject_cast<QCheckBox*>(tableWidget->cellWidget(i, 1));
+            if (checkBox) setting["value"] = checkBox->isChecked();
+        }
+        else if (type == "double") {
+            QSpinBox* spinBox = qobject_cast<QSpinBox*>(tableWidget->cellWidget(i, 1));
+            if (spinBox) setting["value"] = spinBox->value();
+        }
+        else {
+            QTableWidgetItem* valueItem = tableWidget->item(i, 1);
+            if (valueItem) setting["value"] = valueItem->text();
+        }
+
+        settings[i] = setting;
+    }
+    qDebug() << "settings " << settings;
+
+    accept(); // Закрываем диалог
+}
+
+
+void SettingsDialog::updateSettings(const QJsonArray& newSettings) {
+    settings = newSettings;
+    tableWidget->clearContents();
+    tableWidget->setRowCount(settings.size());
+
+    for (int i = 0; i < settings.size(); ++i) {
+        QJsonObject setting = settings[i].toObject();
+
+        QString name = setting["name"].toString();
+        QString type = setting["type"].toString();
+        QVariant value = setting["value"].toVariant();
+
+        // Название настройки
+        QTableWidgetItem* nameItem = new QTableWidgetItem(name);
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        tableWidget->setItem(i, 0, nameItem);
+
+        // Элемент для редактирования значения
+        if (type == "int") {
+            QSpinBox* spinBox = new QSpinBox();
+            spinBox->setMinimum(0);
+            spinBox->setMaximum(1000);
+            spinBox->setValue(value.toInt());
+            tableWidget->setCellWidget(i, 1, spinBox);
+        }
+        else if (type == "bool") {
+            QCheckBox* checkBox = new QCheckBox();
+            checkBox->setChecked(value.toBool());
+            tableWidget->setCellWidget(i, 1, checkBox);
+        }
+        else if (type == "double") {
+            QSpinBox* spinBox = new QSpinBox();
+            spinBox->setMinimum(0);
+            spinBox->setMaximum(1000);
+            spinBox->setValue(value.toInt());
+            tableWidget->setCellWidget(i, 1, spinBox);
+        }
+        else {
+            QTableWidgetItem* valueItem = new QTableWidgetItem(value.toString());
+            tableWidget->setItem(i, 1, valueItem);
+        }
+    }
+}
+
+QJsonArray SettingsDialog::getUpdatedSettings() const {
+    return settings;
+}
+
+
+#ifndef SETTINGSDIALOG_H
+#define SETTINGSDIALOG_H
+
+#include <QDialog>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QListWidget>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QTableWidget>
+
+class SettingsDialog : public QDialog {
+    Q_OBJECT
+
+public:
+    explicit SettingsDialog(const QJsonArray& settings, QWidget* parent = nullptr);
+    //~SettingsDialog();
+
+    QJsonArray getUpdatedSettings() const;
+    void updateSettings(const QJsonArray& newSettings);
+
+private:
+    QJsonArray settings;
+
+    QTableWidget* tableWidget;
+
+    QListWidget* listWidget;
+    QLabel* nameLabel;
+    QLineEdit* valueEdit;
+    QPushButton* saveButton;
+
+private slots:
+    //void onSettingSelected(QListWidgetItem* current);
+    void onSaveClicked();
+};
+
+#endif // SETTINGSDIALOG_H
+
+
+#include "studentinfo.h"
+
+#include <QFileDialog>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+
+QJsonArray studentInfo::studentFields;
+
+studentInfo::studentInfo(const QJsonObject& fields)
+{
+    int totalFields = studentInfo::studentFields.size();  // Получаем количество полей из studentFields
+
+    // Создаем копию входного объекта данных
+    QJsonObject updatedFields = fields;
+
+    // Дополняем поле "fields", если каких-то данных не хватает
+    for (int i = 0; i < totalFields; ++i)
+    {
+        QJsonObject field = studentInfo::studentFields.at(i).toObject();  // Используем at() для получения элемента
+
+        QString fieldId = field["id"].toString();
+        if (!updatedFields.contains(fieldId))
+        {
+            updatedFields.insert(fieldId, field["defaultValue"].toString());  // Добавляем значение по умолчанию, если его нет
+        }
+    }
+
+    // Передаем обновленные поля в метод установки полей
+    setFields(updatedFields);
+}
+
+void studentInfo::setFields(const QJsonObject& fields)
+{
+    for (const QJsonValue& value : studentInfo::studentFields)     // Перебираем элементы в QJsonArray
+    {
+        if (value.isObject())  // Проверяем, что это действительно QJsonObject
+        {
+            QJsonObject field = value.toObject();  // Извлекаем QJsonObject
+
+            QString fieldID = field["id"].toString();
+            QString defaultValue = field["defaultValue"].toString();    // Значение по умолчанию из структуры
+
+            if (fields.contains(fieldID))  // Проверяем, есть ли значение для данного поля в данных
+            {
+                QString fieldValue = fields[fieldID].toString();
+                studentsData[fieldID] = fieldValue.isEmpty() ? defaultValue : fieldValue; // Если значение пустое, используем значение по умолчанию
+            }
+            else
+            {
+                studentsData[fieldID] = defaultValue.isEmpty() ? "-" : defaultValue; // Если поле не присутствует в данных, устанавливаем значение по умолчанию
+            }
+        }
+    }
+
+    studentsData["hash"] = generateHash();  // Генерация хэша и добавление в studentsData
+}
+
+QString studentInfo::getStudentInfo()
+{
+    QString studentInfoStr = "";
+
+    for (const QJsonValue& val : studentFields)
+    {
+        if (!val.isObject()) continue;
+
+        QJsonObject fieldObj = val.toObject();
+        if (!fieldObj["showInTable"].toBool()) continue;
+
+        QString fieldId = fieldObj["id"].toString();
+        QString label = fieldObj["label"].toString();
+
+        QString value = studentsData.value(fieldId).toString();
+        studentInfoStr += label + ": " + value + "\n";
+    }
+    return studentInfoStr;
+}
+
+void studentInfo::loadStudentFields(const QJsonObject& data)
+{
+    if (!data.contains("structure") || !data["structure"].isArray()) {
+        qDebug() << "Ошибка: данные структуры студентов отсутствуют или имеют некорректный формат!";
+        return;
+    }
+
+    QJsonArray jsonArray = data["structure"].toArray();
+
+    studentFields = jsonArray;    // Очищаем текущую структуру, если необходимо
+
+    qDebug() << "Структура студентов загружена:" << studentFields;
+}
+
+void studentInfo::loadStudentFields()
+{
+ /*   QFile file("students_structure.json");
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        qDebug() << "Ошибка открытия структуры данных!";
+        return;
+    }
+
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+
+    if (!doc.isArray())
+    {
+        qDebug() << "Некорректный формат структуры!";
+        return;
+    }
+
+    QJsonArray jsonArray = doc.array();
+    studentFields.clear();
+
+    for (const QJsonValue& value : jsonArray)
+    {
+        if (value.isObject())
+        {
+            QJsonObject obj = value.toObject();
+            studentFields.append(obj);  // добавляем в список
+        }
+    }
+
+    qDebug() << "Структура загружена: " << studentFields;*/
+}
+
+QVector<studentInfo*> studentInfo::readStudentListFromCSV()
+{
+    QVector<studentInfo*> newStudents;
+
+    // Открываем диалоговое окно выбора файла
+    QString fileName = QFileDialog::getOpenFileName(
+        nullptr,  // Родительский виджет
+        "Выберите файл",  // Заголовок окна
+        "",  // Начальный путь (пусто, чтобы использовать стандартный)
+        "CSV Files (*.csv);;All Files (*)"  // Фильтры для выбора файлов
+        );
+    qDebug() << "1: ";
+
+    // Проверка, если пользователь отменил выбор или не выбрал файл
+    if (fileName.isEmpty())
+    {
+        qDebug() << "Файл не выбран.";
+        return {};  // Возвращаем пустой список студентов
+    }
+
+    QFile file(fileName);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        qDebug() << "Не удалось открыть файл:" << fileName;
+        return {};  // Возвращаем пустой список, если файл не открылся
+    }
+
+    QTextStream in(&file);
+
+    // Читаем первую строку с идентификаторами полей (эти поля присутствуют в файле)
+    QString headerLine = in.readLine();
+    QStringList headers = headerLine.split(",");
+
+    while (!in.atEnd())
+    {
+        QString line = in.readLine();
+        if (line.isEmpty() || line.startsWith("//"))
+            continue;
+
+        // Разбиваем строку на части
+        QStringList fields = line.split(",");
+
+        // Создаем QJsonObject для данных студента
+        QJsonObject studentData;
+        for (int i = 0; i < headers.size(); i++)
+        {
+            studentData.insert(headers[i], fields[i]);  // Заполняем QJsonObject
+        }
+
+        studentInfo* newStudent = new studentInfo(studentData);  // Передаем QJsonObject в конструктор
+        newStudents.append(newStudent);
+    }
+
+    file.close();
+    return newStudents;
+}
+
+#ifndef STUDENTINFO_H
+#define STUDENTINFO_H
+
+#include <QObject>
+#include <QCryptographicHash>
+#include <QDebug>
+#include <QJsonObject>
+
+class QString;
+
+class studentInfo : public QObject
+{
+    Q_OBJECT
+
+public:
+    studentInfo(const QJsonObject& fields);
+
+    static QJsonArray studentFields;    // важен порядок
+
+    static QVector<studentInfo*> readStudentListFromCSV();
+    static void loadStudentFields();
+    static void loadStudentFields(const QJsonObject& data);
+
+    bool getConnected() const { return studentsData.contains("connected") && studentsData["connected"] == "true";    }
+    void setConnected(bool _connected) { studentsData["connected"] = _connected ? "true" : "false"; }
+
+
+    QString getHash() const { return studentsData["hash"].toString(); }
+    QJsonObject getStudentsData() { return studentsData; }
+    QString getStudentInfo();
+
+    void setFields(const QJsonObject& fields);
+    void setStudentsData(QJsonObject updatedData) { studentsData= updatedData; }
+    void setVariant(QString newVariant) { studentsData["variant"] = newVariant; }  // Обновляем в studentInfo
+
+
+    QString generateHash() const
+    {
+        QString data = QString("%1|%2")
+                           .arg(studentsData["name"].toString())
+                           .arg(studentsData["group"].toString());
+        return QString(QCryptographicHash::hash(data.toUtf8(), QCryptographicHash::Md5).toHex());
+    }
+
+private:
+    QJsonObject studentsData;   // не важен порядок
+};
+
+#endif // STUDENTINFO_H
+
+
+#include "teacherclient.h"
+#include "studentinfo.h"
+#include "variantselectiondialog.h"
+#include "settingsdialog.h"
+#include "groupsdialog.h"
+
+#include <QVBoxLayout>
+#include <QPushButton>
+#include <QLineEdit>
+#include <QTabWidget>
+#include <QLabel>
+#include <QMessageBox>
+#include <QFile>
+#include <QFileDialog>
+#include <QTextEdit>
+#include <QTextStream>
+#include <QMenuBar>
+#include <QJsonArray>
+#include <QVector>
+
+
+TeacherClient::TeacherClient(QWidget* parent)
+    : QMainWindow(parent), socket(new QTcpSocket(this)), settingsDialog(nullptr)
+{
+    connect(socket, &QTcpSocket::connected, this, &TeacherClient::onConnected);
+    connect(socket, &QTcpSocket::readyRead, this, &TeacherClient::onReadyRead);
+    connect(socket, &QTcpSocket::disconnected, this, &TeacherClient::onDisconnected);
+    connect(socket, &QTcpSocket::errorOccurred, this, &TeacherClient::onErrorOccurred);
+
+    connectToServer("127.0.0.1", 12345); // IP и порт сервера
+
+    setupUI();
+    createMenu();
+
+    qDebug()<<"vload ";
+    variants = readVariantsFromFile("variants.txt");
+
+    //stSettings = loadSettingsFromTXT("standartSettings.txt");
+    //qDebug() << "JSON-настройки:" << stSettings;//QJsonDocument(stSettings).toJson(QJsonDocument::Indented);
+}
+
+TeacherClient::~TeacherClient() {}
+
+//+++++++++++++API
+
+void TeacherClient::sendRequest(const QString& requestType, const QJsonObject& data, bool wait)
+{
+    QJsonObject request;
+    request["role"] = "teacher";
+
+    request["action"] = requestType;
+    if (!data.isEmpty()) {
+        request["data"] = data;
+    }
+
+    QJsonDocument doc(request);
+    QByteArray requestData = doc.toJson();
+
+    socket->write(requestData);
+    socket->flush();
+
+    qDebug() << "Запрос отправлен на сервер.";
+    qDebug() << doc;
+
+    if ((wait) && (socket->waitForReadyRead(5000)))
+    {
+        qDebug() << "Данные получены, waitForReadyRead разблокировался";
+        qDebug() << "Получен ответ.";
+    } else {
+        qDebug() << "Ошибка: Тайм-аут при ожидании данных";
+    }
+}
+
+void TeacherClient::handleResponse(const QByteArray& responseData)
+{
+    QJsonDocument doc = QJsonDocument::fromJson(responseData);
+    qDebug() << "doc формат ответа!" <<doc;
+
+    if (!doc.isObject())
+    {
+        qDebug() << "Некорректный формат ответа!";
+        return;
+    }
+
+    QJsonObject response = doc.object();
+
+    // Определяем тип ответа
+    QString action = response["action"].toString();
+    qDebug() << "Получен ответ от сервера. Action:" << action;
+
+    if (response.contains("data"))    // Дальше можно обрабатывать данные, если они есть
+    {
+        qDebug()<<"contains(data) ";
+        if (action == "getStudentStructure")
+        {
+            QJsonObject data = response["data"].toObject();
+            qDebug()<<"data1 " << data;
+            studentInfo::loadStudentFields(data);
+        }
+        else if (action == "updateStudentsData")
+        {
+            QJsonObject data = response["data"].toObject();
+            UpdateStudentsData(data["studentsData"].toArray());
+        }
+        else if (action == "getDefaultSettings")
+        {
+            QJsonObject data = response["data"].toObject();
+            recDefaultSettings(data["defaultSettings"].toArray());
+            qDebug() << "].toArray():" << data["defaultSettings"].toArray();
+            qDebug() << "data:" << data;
+        }
+        else if (action == "getStudentList")
+        {
+            QJsonArray studentArray = response["StudentList"].toArray();
+            UpdateStudentsData(studentArray);  // Обновляем данные студентов
+        }
+        else
+        {
+            qDebug() << "Неизвестный action в ответе сервера:" << action;
+        }
+    }
+}
+
+//-------------API
+
+
+
+//+++++++++++++СЛОТЫ И СИГНАЛЫ СЕРВЕРА
+
+void TeacherClient::onConnected()
+{
+    qDebug("Подключено к серверу!");
+    getStudentStructure();
+    getDefaultSettings();
+
+   // sendRequest("updateStudentsData");
+}
+
+void TeacherClient::onReadyRead()
+{
+    qDebug() << "принят ответ:";
+    QByteArray data = socket->readAll();
+    handleResponse(data);
+}
+
+void TeacherClient::onDisconnected()
+{
+    qDebug("Соединение с сервером разорвано.");
+}
+
+void TeacherClient::onErrorOccurred(QAbstractSocket::SocketError socketError)
+{
+    QString errorMessage;
+    switch (socketError) {
+    case QAbstractSocket::HostNotFoundError:
+        errorMessage = "Сервер не найден.";
+        break;
+    case QAbstractSocket::ConnectionRefusedError:
+        errorMessage = "Соединение отклонено сервером.";
+        break;
+    case QAbstractSocket::RemoteHostClosedError:
+        errorMessage = "Сервер разорвал соединение.";
+        break;
+    default:
+        errorMessage = "Ошибка: " + socket->errorString();
+    }
+
+    QMessageBox::critical(this, "Ошибка подключения", errorMessage);
+    qDebug("Ошибка подключения.");
+}
+
+//-------------СЛОТЫ И СИГНАЛЫ СЕРВЕРА
+
+
+
+//+++++++++++++ИНТЕРФЕЙС
+
+    //+++++++++++++СОЗДАНИЕ ИНТЕРФЕЙСА
+
+void TeacherClient::setupUI()
+{
+    auto* mainWidget = new QWidget(this);
+    setCentralWidget(mainWidget);
+
+    auto* layout = new QHBoxLayout(mainWidget);    // Основной layout
+
+    // Панель слева (Список студентов)
+    auto* leftPanel = new QWidget(this);
+    auto* leftLayout = new QVBoxLayout(leftPanel);
+
+    setupStudentTable(leftLayout);    // Создаем таблицу с данными студентов
+
+    leftPanel->setLayout(leftLayout);
+    layout->addWidget(leftPanel, 2);  // Панель слева занимает 2 части
+
+    // Панель справа (Вкладки для выбранного студента)
+    auto* rightPanel = new QWidget(this);
+    auto* rightLayout = new QVBoxLayout(rightPanel);
+
+    studentInfoTextEdit = new QTextEdit(this);
+    studentInfoTextEdit->setReadOnly(true); // Делаем поле только для чтения
+
+    rightLayout->addWidget(studentInfoTextEdit);
+    rightPanel->setLayout(rightLayout);
+    layout->addWidget(rightPanel, 1);  // Панель справа занимает 1 часть
+
+    // Кнопки
+    //QPushButton* sendStudentsButton = new QPushButton("Отправить список студентов", this);
+    //layout->addWidget(sendStudentsButton);
+
+    QPushButton* requestStudentsConnectButton = new QPushButton("Обновить список студентов", this);
+    layout->addWidget(requestStudentsConnectButton);
+    connect(requestStudentsConnectButton, &QPushButton::clicked, this, &TeacherClient::updateStudentsFromServer);
+}
+
+void TeacherClient::setupStudentTable(QVBoxLayout* layout)
+{
+    studentTable = new QTableWidget(this);
+
+    QStringList headers;
+    QList<int> hiddenColumns;
+
+    int column = 0;
+    for (const QJsonValue& value : studentInfo::studentFields)
+    {
+        if (value.isObject())  // Проверяем, что это QJsonObject
+        {
+            QJsonObject field = value.toObject();  // Извлекаем объект
+
+            headers.append(field["label"].toString()); // Добавляем заголовки для таблицы
+            qDebug() << "добавленные столбцы " << field["label"];
+
+            if (!field["showInTable"].toBool()) // Если поле не нужно показывать в таблице, запоминаем его
+            {
+                hiddenColumns.append(column);
+                qDebug() << "скрытые столбцы " << field["label"];
+            }
+            column++;
+        }
+    }
+
+    studentTable->setColumnCount(headers.size());
+    studentTable->setHorizontalHeaderLabels(headers);
+
+    for (int col : hiddenColumns) // Скрываем столбцы, которые не нужно показывать
+    {
+        studentTable->setColumnHidden(col, true);
+    }
+
+    studentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    //studentTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    studentTable->setColumnHidden(0, true); // Скрываем столбец с хэшем (предполагается, что это первый столбец)
+    connect(studentTable, &QTableWidget::itemSelectionChanged, this, &TeacherClient::onStudentSelected);
+    connect(studentTable, &QTableWidget::cellDoubleClicked, this, &TeacherClient::onVariantDoubleClicked);
+    layout->addWidget(studentTable);
+}
+
+void TeacherClient::createMenu()
+{
+    auto* menuBar = new QMenuBar(this);
+
+    // Меню "Файл"
+    auto* fileMenu = menuBar->addMenu("Файл");
+
+    // Пункт "Добавить студентов"
+    //QAction* addStudentsAction = new QAction("Добавить студентов", this);
+    //connect(addStudentsAction, &QAction::triggered, this, &TeacherClient::onAddStudents);
+    //fileMenu->addAction(addStudentsAction);
+
+    // Пункт "Изменить настройки"
+    QAction* openAction = new QAction("Изменить настройки", this);
+    connect(openAction, &QAction::triggered, this, &TeacherClient::onOpenSettings);
+    fileMenu->addAction(openAction);
+
+    // Пункт "Изменить настройки"
+    QAction* shutdownServerAction = new QAction("Завершить работу сервера", this);
+    connect(shutdownServerAction, &QAction::triggered, this, &TeacherClient::shutdownServer);
+    fileMenu->addAction(shutdownServerAction);
+
+    // Меню "Студент"
+    auto* studentMenu = menuBar->addMenu("Студент");
+    QAction* editStudentSettings = new QAction("Изменить настройки студента", this);
+    QAction* editStudentVariant = new QAction("Изменить вариант студента", this);
+
+    connect(editStudentSettings, &QAction::triggered, this, &TeacherClient::onEditStudentSettings);
+    connect(editStudentVariant, &QAction::triggered, this, &TeacherClient::onEditStudentVariant);
+    studentMenu->addAction(editStudentSettings);
+    studentMenu->addAction(editStudentVariant);
+
+    QAction* groupsAction = new QAction("Группы студентов", this);
+    connect(groupsAction, &QAction::triggered, this, &TeacherClient::onOpenGroups);
+    fileMenu->addAction(groupsAction);
+
+    setMenuBar(menuBar);
+}
+
+void TeacherClient::onOpenGroups() {
+    GroupsDialog dlg(this);
+    dlg.setGroupsFile("groups.json");
+    dlg.setStudentsFile("students.json");
+    connect(&dlg, &GroupsDialog::groupStudentNames, this, &TeacherClient::onAddStudents);
+    dlg.loadGroups();
+    dlg.loadStudents();
+    if (dlg.exec() == QDialog::Accepted) {
+        // всё обработается в сигналах
+    }
+}
+
+    //-------------СОЗДАНИЕ ИНТЕРФЕЙСА
+
+
+    //+++++++++++++ОБРАБОТКА СОБЫТИЙ
+
+void TeacherClient::onEditStudentVariant()
+{
+    int row = studentTable->currentRow();
+    if (row < 0)
+    {
+        QMessageBox::warning(this, "Ошибка", "Выберите студента в таблице.");
+        return;
+    }
+
+    // Найти колонку с вариантом, используя label из studentFields
+    QString variantLabel;
+    for (const QJsonValue& fieldValue : studentInfo::studentFields)
+    {
+        QJsonObject field = fieldValue.toObject();
+        if (field["id"].toString() == "variant")
+        {
+            variantLabel = field["label"].toString();
+            break;
+        }
+    }
+
+    int variantColumn = -1;
+    for (int i = 0; i < studentTable->columnCount(); ++i)
+    {
+        QTableWidgetItem* headerItem = studentTable->horizontalHeaderItem(i);
+        if (headerItem && headerItem->text() == variantLabel)
+        {
+            variantColumn = i;
+            break;
+        }
+    }
+
+    if (variantColumn == -1)
+    {
+        QMessageBox::warning(this, "Ошибка", "Не удалось найти колонку варианта.");
+        return;
+    }
+
+    openVariantSelectionDialog(row, variantColumn);
+}
+
+
+void TeacherClient::shutdownServer()
+{
+    QJsonObject request;
+    sendRequest("shutdownServer", request, true); // если у тебя есть sendJson для отправки на сервер
+}
+
+void TeacherClient::onEditStudentSettings()
+{
+    QModelIndexList selectedIndexes = studentTable->selectionModel()->selectedIndexes();
+    if (selectedIndexes.isEmpty()) {
+        QMessageBox::warning(this, "Ошибка", "Выберите студента для изменения настроек.");
+        return;
+    }
+
+    // Используем `QSet`, чтобы исключить дублирующиеся строки
+    QSet<int> selectedRows;
+    for (const QModelIndex& index : selectedIndexes) {
+        selectedRows.insert(index.row());
+    }
+
+    // Берём первую выделенную строку
+    int firstRow = *selectedRows.begin();
+    QTableWidgetItem* firstItem = studentTable->item(firstRow, 0);
+    if (!firstItem) {
+        QMessageBox::warning(this, "Ошибка", "Ошибка при получении данных студента.");
+        return;
+    }
+
+    QString primaryStudentHash = firstItem->data(Qt::UserRole).toString();
+    qDebug() << "primaryStudentHash: " << primaryStudentHash;
+
+    // Загружаем настройки студента или берём defaultSettings
+    QJsonArray initialSettings = studentSettings.contains(primaryStudentHash)
+                                     ? studentSettings[primaryStudentHash]
+                                     : defaultSettings;
+    qDebug() << "Загружены настройки для студента: " << initialSettings;
+
+    // Если окно настроек ещё не создано — создаём, иначе обновляем его содержимое
+    if (!settingsDialog) {
+        settingsDialog = new SettingsDialog(initialSettings, this);
+    } else {
+        settingsDialog->updateSettings(initialSettings);
+    }
+
+    // Открываем окно настроек
+    if (settingsDialog->exec() == QDialog::Accepted) {
+        QJsonArray updatedSettings = settingsDialog->getUpdatedSettings();
+        QJsonArray studentHashes;
+
+        // Добавляем хэши **только уникальных строк**
+        for (int row : selectedRows) {
+            QTableWidgetItem* studentItem = studentTable->item(row, 0);
+            if (!studentItem) continue;
+
+            QString currentStudentHash = studentItem->data(Qt::UserRole).toString();
+            if (!currentStudentHash.isEmpty()) {
+                studentHashes.append(currentStudentHash);
+                studentSettings[currentStudentHash] = updatedSettings;
+            }
+        }
+
+        // Отправляем обновления на сервер
+        sendUpdatedStudentsSettings(studentHashes, updatedSettings);
+        qDebug() << "Обновлённые настройки отправлены на сервер.";
+    }
+}
+
+
+void TeacherClient::sendUpdatedStudentsSettings(const QJsonArray& studentHashes, const QJsonArray& updatedSettings)
+{
+    QJsonObject request;
+    request["studentHashes"] = studentHashes;
+    request["updatedSettings"] = updatedSettings;
+
+    sendRequest("updateStudentSettings", request);
+    qDebug() << "Отправлены обновленные настройки на сервер:" << request;
+}
+
+void TeacherClient::sendUpdatedSettings(const QJsonArray& updatedSettings)
+{
+    QJsonObject request;
+    //defaultSettings = settingsDialog->getUpdatedSettings();
+    request["defaultSettings"] = updatedSettings;
+
+    sendRequest("updateDefaultSettings", request);
+    qDebug() << "Отправлены обновлённые настройки на сервер";
+}
+
+void TeacherClient::onOpenSettings()
+{
+    qDebug() << "Открытие настроек по умолчанию, текущие defaultSettings: " << defaultSettings;
+
+    if (!settingsDialog) {
+        settingsDialog = new SettingsDialog(defaultSettings, this);
+    } else {
+        settingsDialog->updateSettings(defaultSettings);
+    }
+
+    if (settingsDialog->exec() == QDialog::Accepted)
+    {
+        defaultSettings = settingsDialog->getUpdatedSettings();
+        sendUpdatedSettings(defaultSettings);  // Отправляем обновлённые настройки на сервер
+    }
+
+    qDebug() << "Настройки по умолчанию обновлены: " << defaultSettings;
+}
+
+void TeacherClient::onSaveSettings() {
+    // Реализуйте сохранение настроек
+}
+
+void TeacherClient::onAddStudents(const QStringList& names, QString group)
+{
+
+   /* QVector<studentInfo*> newStudents = studentInfo::readStudentListFromCSV();
+
+    for (studentInfo* student : newStudents)
+    {
+        QString studentHash = student->getHash();
+        qDebug() << studentHash;
+
+        if (students.contains(studentHash))
+        {
+            QMessageBox::StandardButton reply = QMessageBox::question(
+                this, "Подтверждение",
+                QString("Студент %1 уже существует. Продолжить добавление?")
+                    .arg(student->getStudentsData()["name"].toString()),
+                QMessageBox::Yes | QMessageBox::No);
+
+            if (reply == QMessageBox::No) {
+                delete student;  // Освобождаем память
+                continue;
+            }
+        }
+
+        addStudent(student);        // Добавляем студента в список
+        updateStudentRow(student->getStudentsData());  // Обновляем его строку в таблице
+    }
+
+    qDebug() << "Добавлено студентов: " << newStudents.size();
+
+    sendNewStudentListToServer(newStudents);*/
+
+
+
+   qDebug() << names;
+
+
+    QVector<studentInfo*> newStudents;
+
+    for (const QString& name : names)
+    {
+        QJsonObject studentData;
+
+        studentData.insert("name", name);  // Заполняем QJsonObject
+        studentData.insert("group", group);  // Заполняем QJsonObject
+
+        studentInfo* newStudent = new studentInfo(studentData);  // Передаем QJsonObject в конструктор
+        newStudents.append(newStudent);
+    }
+
+    for (studentInfo* student : newStudents)
+    {
+        QString studentHash = student->getHash();
+        qDebug() << studentHash;
+
+        if (students.contains(studentHash))
+        {
+            QMessageBox::StandardButton reply = QMessageBox::question(
+                this, "Подтверждение",
+                QString("Студент %1 уже существует. Продолжить добавление?")
+                    .arg(student->getStudentsData()["name"].toString()),
+                QMessageBox::Yes | QMessageBox::No);
+
+            if (reply == QMessageBox::No) {
+                delete student;  // Освобождаем память
+                continue;
+            }
+        }
+
+        addStudent(student);        // Добавляем студента в список
+        updateStudentRow(student->getStudentsData());  // Обновляем его строку в таблице
+    }
+
+    qDebug() << "Добавлено студентов: " << newStudents.size();
+
+    sendNewStudentListToServer(newStudents);
+
+}
+
+void TeacherClient::onStudentSelected()
+{
+    int row = studentTable->currentRow();
+    if (row == -1) return;  // Если ничего не выбрано, выходим
+
+    QString studentHash = studentTable->item(row, 0)->data(Qt::UserRole).toString();
+    QString studentInfo = students.value(studentHash)->getStudentInfo();
+
+    studentInfoTextEdit->setText(studentInfo);    // Заполняем текстовое поле
+}
+
+void TeacherClient::onVariantDoubleClicked(int row, int column)
+{
+    QTableWidgetItem* headerItem = studentTable->horizontalHeaderItem(column);
+    if (!headerItem) return;
+
+    QString columnHeader = headerItem->text();
+
+    // Получаем label столбца "variant" из структуры хранения данных студента
+    QString variantLabel;
+    for (const QJsonValue& fieldValue : studentInfo::studentFields)
+    {
+        QJsonObject field = fieldValue.toObject();
+        if (field["id"].toString() == "variant")
+        {
+            variantLabel = field["label"].toString();
+            break;
+        }
+    }
+
+    if (columnHeader == variantLabel)
+    {
+        qDebug() << "Variant column clicked. Opening selection window...";
+        openVariantSelectionDialog(row, column); // Передаем и строку, и колонку
+    }
+}
+
+    //-------------ОБРАБОТКА СОБЫТИЙ
+
+
+
+    //+++++++++++++ДИАЛОГОВЫЕ ОКНА
+
+void TeacherClient::openVariantSelectionDialog(int row, int column)
+{
+    QTableWidgetItem* hashItem = studentTable->item(row, 0);
+    qDebug() << "!hashItem "<<!hashItem<< hashItem->data(Qt::UserRole).toString();
+    if (!hashItem) return;
+
+    QTableWidgetItem* item = studentTable->item(row, column);
+    QString currentVariant = item ? item->text() : "";
+
+
+    qDebug() << "Opening variant selection for row" << row << ", column" << column << "Current variant:" << currentVariant;
+
+    QString studentHash = hashItem->data(Qt::UserRole).toString();
+    studentInfo* student = students[studentHash];
+
+
+    qDebug() << "Attempting to open variant dialog...";
+    VariantSelectionDialog dialog(getVariants(), this, currentVariant);
+    qDebug() << "Before exec";
+    if (dialog.exec() == QDialog::Accepted)
+    {
+        qDebug() << "Dialog accepted";
+        QString newVariant = dialog.getSelectedVariant();
+
+        student->setVariant(newVariant);  // Обновляем в studentInfo
+        updateStudentRow(student->getStudentsData());  // Обновляем строку в таблице
+
+        //sendStudentData(student->getStudentsData());
+        updateSelectedStudentFields(studentHash, QStringList("variant"));
+
+    }
+    qDebug() << "After exec";
+}
+
+
+    //-------------ДИАЛОГОВЫЕ ОКНА
+
+//-------------ИНТЕРФЕЙС
+
+
+
+//+++++++++++++ОТПРАВКА ЗАПРОСОВ
+
+void TeacherClient::updateStudentsFromServer()
+{
+
+    sendRequest("updateStudentsData"); // Отправляем запрос на сервер
+}
+
+void TeacherClient::sendStudentData(const QJsonObject& studentData)
+{
+    if (studentData.isEmpty())
+    {
+        qDebug() << "Ошибка: Пустые данные студента!";
+        return;
+    }
+
+    qDebug() << "Отправка данных студента" << studentData << "на сервер...";
+    sendRequest("sendStudentData", studentData);
+}
+
+void TeacherClient::sendNewStudentListToServer(QVector<studentInfo*> newStudents)
+{
+    QJsonArray studentArray;
+
+    for (studentInfo* student : newStudents)
+    {
+        if (!student) continue;
+
+        QJsonObject studentObject;
+
+        foreach (QString key, student->getStudentsData().keys())
+        {
+            QString value = student->getStudentsData().value(key).toString();
+            studentObject[key] = value;
+            qDebug() << key <<value;
+        }
+
+        studentArray.append(studentObject);
+    }
+
+    QJsonObject requestData;
+    requestData["students"] = studentArray;
+
+    sendRequest("addStudent", requestData);  // Отправка на сервер
+}
+
+void TeacherClient::getDefaultSettings()
+{
+    sendRequest("getDefaultSettings");
+    qDebug() << "Отправлен запрос на получение настроек по умолчанию";
+}
+
+void TeacherClient::getStudentStructure()
+{
+    sendRequest("getStudentStructure");
+    qDebug() << "Отправлен запрос на получение структуры ханения данных студента";
+}
+
+void TeacherClient::updateSelectedStudentFields(const QString& studentHash, const QStringList& selectedFieldIds)
+{
+    if (!students.contains(studentHash))
+    {
+        qWarning() << "Студент не найден.";
+        return;
+    }
+
+    studentInfo* student = students[studentHash];
+    QJsonObject fullData = student->getStudentsData();
+    QJsonObject updatePayload;
+
+    for (const QString& fieldId : selectedFieldIds)
+    {
+        if (fullData.contains(fieldId)) {
+            updatePayload[fieldId] = fullData[fieldId];
+        }
+    }
+
+    updatePayload["hash"] = studentHash;  // обязательно
+
+    sendRequest("updateStudentFields", updatePayload);
+}
+
+
+
+
+
+//-------------ОТПРАВКА ЗАПРОСОВ
+
+
+
+//+++++++++++++ОБРАБОТКА ОТВЕТОВ СЕРВЕРА
+
+void TeacherClient::UpdateStudentsData(const QJsonArray& studentArray)
+{
+    qDebug() <<  "UpdateStudentsData ";// << studentArray;
+    for (const QJsonValue& value : studentArray)
+    {
+        if (!value.isObject()) continue;
+
+        QJsonObject studentObj = value.toObject();
+        QString studentHash = studentObj["hash"].toString();
+
+        studentInfo* student;
+
+        if (students.contains(studentHash))
+        {
+            student = students[studentHash];
+        }
+        else
+        {
+            student = new studentInfo(studentObj);
+            students.insert(studentHash, student);
+        }
+
+        QJsonObject updatedJsonObject;
+        for (const QString& key : studentObj.keys())
+        {
+            updatedJsonObject[key] = studentObj[key].toString();
+        }
+
+        student->setStudentsData(updatedJsonObject);
+        student->setConnected(studentObj["connected"].toBool());
+        qDebug() <<  "updateRow " << student->getStudentsData();
+        updateStudentRow(student->getStudentsData()); // Обновляем строку в таблице
+    }
+}
+
+void TeacherClient::recDefaultSettings(const QJsonArray& response)
+{
+    qDebug() << "Получены настройки по умолчанию:" << response;
+
+    // Сохраняем настройки в переменную
+    defaultSettings = response;
+    qDebug() << "response:" << response;
+    qDebug() << "defaultSettings:" << defaultSettings;
+}
+
+//-------------ОБРАБОТКА ОТВЕТОВ СЕРВЕРА
+
+
+
+//+++++++++++++ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ
+
+void TeacherClient::connectToServer(const QString& host, quint16 port)
+{
+    socket->connectToHost("127.0.0.1", 12345); // Подключение к локальному серверу
+    if (socket->waitForConnected(3000))
+    {
+        QMessageBox::information(this, "Подключение", "Соединение установлено!");
+    } else {
+        QMessageBox::warning(this, "Ошибка", "Не удалось подключиться к серверу!");
+    }
+}
+
+void TeacherClient::addStudent(studentInfo* newStudent)
+{
+    students.insert(newStudent->getHash(), newStudent);
+}
+
+void TeacherClient::updateStudentTable()
+{
+    studentTable->clearContents();
+    studentTable->setRowCount(0);
+
+    for (auto student : students)
+    {
+        updateStudentRow(student->getStudentsData());
+    }
+}
+
+void TeacherClient::updateStudentRow(const QJsonObject& studentsData)
+{
+    if (studentsData.isEmpty()) return;
+
+    QString studentHash = studentsData["hash"].toString();
+    if (studentHash.isEmpty()) {
+        qDebug() << "Ошибка: В данных студента отсутствует hash!";
+        return;
+    }
+
+    int row = -1;
+
+    // 🔍 Ищем строку с таким же хэшем в 0-м столбце
+    for (int i = 0; i < studentTable->rowCount(); i++)
+    {
+        QTableWidgetItem* item = studentTable->item(i, 0);
+        if (item && item->data(Qt::UserRole).toString() == studentHash)
+        {
+            row = i;
+            break;
+        }
+    }
+
+    // Если не нашли строку, создаем новую
+    if (row == -1)
+    {
+        row = studentTable->rowCount();
+        studentTable->insertRow(row);
+    }
+
+    QString cellValue;
+    QString fieldId;
+    int column = -1;
+
+    // 🔵 Обновляем или добавляем данные в строку
+    for (const QJsonValue& fieldValue : studentInfo::studentFields)
+    {
+        column++;
+        if (!fieldValue.isObject()) continue;  // Пропускаем, если это не объект
+
+        QJsonObject field = fieldValue.toObject();
+
+        fieldId = field["id"].toString();
+        cellValue = studentsData.contains(fieldId) ? studentsData.value(fieldId).toString() : field["defaultValue"].toString();
+
+        if (fieldId == "connected")
+        {
+            // Преобразуем boolean в иконки для статуса
+            cellValue = studentsData["connected"].toString() == "true" ? "🟢" : "🔴";
+        }
+
+        if (fieldId == "variant")
+        {
+            QStringList parts = studentsData["variant"].toString().split("-", Qt::SkipEmptyParts);
+            cellValue = parts[0];
+        }
+
+        // Если поле в строке уже существует, то обновляем его значение
+        QTableWidgetItem* existingItem = studentTable->item(row, column);
+        if (existingItem)
+        {
+            existingItem->setText(cellValue);
+        }
+        else
+        {
+            // Если это новый элемент, то создаем новый
+            QTableWidgetItem* newItem = new QTableWidgetItem(cellValue);
+            newItem->setFlags(newItem->flags() & ~Qt::ItemIsEditable);  // Сделаем элемент не редактируемым
+            studentTable->setItem(row, column, newItem);
+        }
+
+        // Увековечиваем хэш в качестве пользовательских данных
+        if (fieldId == "hash") {
+            studentTable->item(row, 0)->setData(Qt::UserRole, studentHash);
+        }
+    }
+
+    qDebug() << "Данные студента обновлены: " << studentHash;
+}
+
+QStringList TeacherClient::readVariantsFromFile(const QString& filePath)
+{
+    QStringList variantsList;
+    QFile file(filePath);
+
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        qWarning() << "Не удалось открыть файл:" << filePath;
+        return variantsList; // Возвращаем пустой список
+    }
+
+    QTextStream in(&file);
+    while (!in.atEnd())
+    {
+        QString line = in.readLine().trimmed();
+
+        if (!line.isEmpty())
+        {
+            variantsList.append(line); // Добавляем строку в список
+        }
+    }
+
+    file.close();
+    return variantsList;
+}
+
+//-------------ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ
+
+
+
+
+
+
+
+
+//-------------------------------------------------
+/*void TeacherClient::loadStudentSettings(QString studentHash) {
+    // Загружаем настройки для выбранного студента
+    /*settingsTable->clearContents();
+
+    // Получаем список настроек (примерные данные)
+    QJsonObject studentSettings = getStudentSettings(studentID);
+    settingsTable->setRowCount(studentSettings.size() + 1);
+
+    // Первый элемент - статус применены ли настройки
+    settingsTable->setItem(0, 0, new QTableWidgetItem("Применены ли настройки"));
+    bool settingsApplied = studentSettings["applied"].toBool();
+    settingsTable->setItem(0, 1, new QTableWidgetItem(settingsApplied ? "✅ Да" : "❌ Нет"));
+
+    // Добавляем остальные настройки
+    int row = 1;
+    for (auto it = studentSettings.begin(); it != studentSettings.end(); ++it) {
+        settingsTable->setItem(row, 0, new QTableWidgetItem(it.key()));
+        settingsTable->setItem(row, 1, new QTableWidgetItem(it.value().toString()));
+        row++;
+    }/
+}
+*/
+void TeacherClient::loadStudentVariants(QString studentHash) {
+    // Загружаем варианты студента
+    /*variantsTable->clearContents();
+
+    // Получаем варианты (примерные данные)
+    QVector<QPair<int, QString>> variants = getStudentVariants(studentID);
+    variantsTable->setRowCount(variants.size());
+
+    for (int i = 0; i < variants.size(); ++i) {
+        int variantNumber = variants[i].first;
+        QString variantText = variants[i].second;
+
+        variantsTable->setItem(i, 0, new QTableWidgetItem(QString::number(variantNumber)));
+        variantsTable->setItem(i, 1, new QTableWidgetItem(variantText));
+    }*/
+}
+
+QJsonObject TeacherClient::loadSettingsFromTXT(const QString& filePath)
+{
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        qDebug() << "Ошибка открытия TXT файла!";
+        return {};
+    }
+
+    QJsonObject settings;
+    QTextStream in(&file);
+
+    while (!in.atEnd())
+    {
+        QString line = in.readLine().trimmed(); // Убираем пробелы
+
+        // Пропускаем комментарии и пустые строки
+        if (line.isEmpty() || line.startsWith("//"))
+            continue;
+
+        // Разделяем строку по '='
+        QStringList parts = line.split(' ');
+        if (parts.size() != 2)
+        {
+            qDebug() << "Ошибка в строке (пропускаем):" << line;
+            continue;
+        }
+
+        QString key = parts[0].trimmed();
+        QString value = parts[1].trimmed();
+
+        // Определяем тип значения
+        if (value.toLower() == "true" || value.toLower() == "false")
+        {
+            settings[key] = (value.toLower() == "true");
+        }
+        else
+        {
+            bool isNumber;
+            int intValue = value.toInt(&isNumber);
+            if (isNumber)
+                settings[key] = intValue;
+            else
+                settings[key] = value; // Оставляем строкой
+        }
+    }
+
+    file.close();
+    return settings;
+}
+
+bool TeacherClient::saveSettingsToTXT(const QJsonObject& settings)
+{
+    // Открываем диалог выбора папки
+    QString folderPath = QFileDialog::getExistingDirectory(nullptr, "Выберите папку для сохранения");
+
+    // Проверяем, выбрал ли пользователь папку
+    if (folderPath.isEmpty())
+    {
+        qDebug() << "Сохранение отменено пользователем.";
+        return false;
+    }
+
+    QString filePath = folderPath + "/settings.txt"; // Имя файла
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        qDebug() << "Ошибка при сохранении файла!";
+        return false;
+    }
+
+    QTextStream out(&file);
+
+    // Записываем данные
+    for (const QString& key : settings.keys())
+    {
+        out << key << " = " << settings.value(key).toVariant().toString() << "\n";
+    }
+
+    file.close();
+    qDebug() << "Настройки сохранены в:" << filePath;
+
+    return true;
+}
+
+
+#include <QMainWindow>
+#include <QTcpSocket>
+#include <QTableWidget>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QVBoxLayout>
+#include <QJsonArray>
+
+#include "settingsdialog.h"
+
+class studentInfo;
+class QTextEdit;
+
+class TeacherClient : public QMainWindow {
+    Q_OBJECT
+
+public:
+    TeacherClient(QWidget* parent = nullptr);
+    ~TeacherClient();
+    void connectToServer(const QString& host, quint16 port);
+    void sendRequest(const QString& requestType, const QJsonObject& data = QJsonObject(), bool wait = true);
+    void handleResponse(const QByteArray& responseData);
+
+    QStringList getVariants() { return variants; }
+
+
+public slots:
+    void onConnected();
+    void onReadyRead();
+    void onDisconnected();
+    void onErrorOccurred(QAbstractSocket::SocketError socketError);
+
+private slots:
+    /*void sendSettingsToServer();
+    void loadStudentList();
+    void addStudent();
+    void removeStudent();*/
+    void onOpenSettings();
+    void onSaveSettings();
+    //void onAddStudents();
+    void onAddStudents(const QStringList& names, QString group);
+
+    void onStudentSelected();
+    void onVariantDoubleClicked(int row, int column);
+    //void sendStudentsToServer();
+    void onEditStudentSettings();
+    void shutdownServer();
+    void onEditStudentVariant();
+private:
+    QTcpSocket* socket;
+
+    QHash<QString, studentInfo*> students;
+    QHash<QString, QJsonArray> studentSettings;
+
+    QStringList variants;
+
+    QTableWidget* studentTable;
+    QTextEdit* studentInfoTextEdit;
+    SettingsDialog* settingsDialog;
+
+    QJsonArray defaultSettings;
+
+
+    void updateStudentRow(studentInfo* student);
+    void setupStudentTable(QVBoxLayout* layout);
+    QStringList readVariantsFromFile(const QString& filePath);
+    void openVariantSelectionDialog(int row, int column);
+    void updateStudentRow(const QJsonObject& studentsData);
+    void sendStudentData(const QJsonObject& studentData);
+
+    void sendUpdatedSettings(const QJsonArray& updatedSettings);
+
+
+    void updateStudentsFromServer();
+    void UpdateStudentsData(const QJsonArray& studentArray);
+    void updateStudentTable(const QJsonArray& connectedStudents);
+    void updateStudentTable();
+
+    void setupUI();
+    void createMenu();
+    void setupConnections();
+
+    void loadStudentResults(QString studentHash);
+    //void loadStudentSettings(QString studentHash);
+    void getDefaultSettings();
+    void recDefaultSettings(const QJsonArray& response);
+    void getStudentStructure();
+    void loadStudentVariants(QString studentHash);
+
+    void sendNewStudentListToServer(QVector<studentInfo*> newStudents);
+
+
+
+    QJsonObject loadSettingsFromTXT(const QString& filePath);
+    bool saveSettingsToTXT(const QJsonObject& settings);
+
+    //QVector<studentInfo*> readStudentListFromCSV();
+
+    void addStudent(studentInfo* newStudent);
+
+    void sendUpdatedStudentsSettings(const QJsonArray& studentHashes, const QJsonArray& updatedSettings);
+
+    void updateSelectedStudentFields(const QString& studentHash, const QStringList& selectedFieldIds);
+
+    void onOpenGroups();
+};
+
+
+#include "variantselectiondialog.h"
+
+VariantSelectionDialog::VariantSelectionDialog(const QStringList& variants, QWidget* parent, QString currentVariant)
+    : QDialog(parent), variantList(variants)
+{
+    setWindowTitle("Выбор варианта");
+    setMinimumSize(400, 300);
+
+    // Виджеты
+    variantListWidget = new QListWidget(this);
+    variantDetails = new QTextEdit(this);
+    variantDetails->setReadOnly(true);
+
+    generateButton = new QPushButton("Сгенерировать", this);
+    selectButton = new QPushButton("Выбрать", this);
+    selectButton->setEnabled(false); // Пока ничего не выбрано
+
+    // Заполняем список номерами вариантов
+    for (const QString& variant : variants)
+    {
+        variantListWidget->addItem(variant.section('-', 0, 0)); // Добавляем номер варианта
+    }
+
+    // Выбираем текущий вариант в списке
+    if (!currentVariant.isEmpty()) {
+        for (int i = 0; i < variantListWidget->count(); ++i) {
+            QListWidgetItem* item = variantListWidget->item(i);
+            if (item->text() == currentVariant.section('-', 0, 0)) {
+                variantListWidget->setCurrentItem(item); // Выбираем элемент списка
+                break;
+            }
+        }
+    }
+
+    // Layouts
+    QVBoxLayout* leftLayout = new QVBoxLayout;
+    leftLayout->addWidget(variantListWidget);
+
+    QVBoxLayout* rightLayout = new QVBoxLayout;
+    rightLayout->addWidget(variantDetails);
+    rightLayout->addWidget(generateButton);
+    rightLayout->addWidget(selectButton);
+
+    QHBoxLayout* mainLayout = new QHBoxLayout;
+    mainLayout->addLayout(leftLayout, 1);
+    mainLayout->addLayout(rightLayout, 2);
+
+    setLayout(mainLayout);
+
+    // Сигналы и слоты
+    connect(variantListWidget, &QListWidget::currentTextChanged, this, &VariantSelectionDialog::updateVariantDetails);
+    connect(selectButton, &QPushButton::clicked, this, &VariantSelectionDialog::accept);
+    connect(generateButton, &QPushButton::clicked, this, &VariantSelectionDialog::generateVariant);
+}
+
+QString VariantSelectionDialog::getSelectedVariant() const
+{
+    return selectedVariant;
+}
+/*
+void VariantSelectionDialog::updateVariantDetails(const QString& variantNumber)
+{
+    for (const QString& variant : variantList)
+    {
+        if (variant.startsWith(variantNumber + "-"))
+        {
+            variantDetails->setText(variant);
+            selectedVariant = variant;
+            selectButton->setEnabled(true);
+            return;
+        }
+    }
+
+    variantDetails->clear();
+    selectButton->setEnabled(false);
+}*/
+
+void VariantSelectionDialog::updateVariantDetails(const QString& variantNumber)
+{
+    // Очищаем поле перед обновлением
+    variantDetails->clear();
+
+
+    for (const QString& variant : variantList)
+    {
+        if (variant.startsWith(variantNumber + "-"))
+        {
+            variantDetails->setText(variant);
+            selectedVariant = variant;
+            selectButton->setEnabled(true);
+        }
+    }
+
+    if (selectedVariant.isEmpty()) {
+        variantDetails->setText("Нет данных");
+        return;
+    }
+
+    QStringList parts = selectedVariant.split('-');
+    QString formattedText;
+
+    // Первая часть – номер варианта (если есть)
+    if (!parts.isEmpty())
+    {
+        formattedText += parts[0] + "\n"; // Номер варианта в первой строке
+        parts.removeFirst(); // Удаляем его из списка, чтобы не мешал обработке
+    }
+
+    // Обрабатываем каждую топологию
+    for (const QString& part : parts)
+    {
+        QStringList subParts = part.split('*'); // Разделяем название топологии и её параметры
+        if (subParts.isEmpty()) continue;
+
+        QString topologyName = subParts.takeFirst().trimmed(); // Первое – это название топологии
+        formattedText += "\n" + topologyName; // Выводим название с новой строки
+
+        // Определяем параметры по типу топологии
+        QStringList paramNames;
+        if (topologyName == "Омега" || topologyName == "Баньян" || topologyName == "н-куб")
+        {
+            paramNames = {"Количество входов сети", "Количество выходов сети"};
+        } else if (topologyName == "Дельта")
+        {
+            paramNames = {"Количество ступеней", "Количество входов кроссбара", "Количество выходов кроссбара"};
+        } else if (topologyName == "Клоша")
+        {
+            paramNames = {
+                "Кроссбарами во входной ступени",
+                "Кроссбарами в промежуточной ступени",
+                "Кроссбарами во выходной ступени",
+                "Входами кроссбаров во входной ступени",
+                "Выходами кроссбаров во выходной ступени"};
+        }
+
+        // Выводим параметры с названиями
+        for (int i = 0; i < subParts.size() && i < paramNames.size(); ++i)
+        {
+            formattedText += "\n" + paramNames[i] + ": " + subParts[i];
+        }
+        formattedText += "\n";
+
+    }
+
+    // Устанавливаем текст в поле описания
+    variantDetails->setText(formattedText);
+}
+
+
+void VariantSelectionDialog::generateVariant()
+{
+
+}
+
+
+#ifndef VARIANTSELECTIONDIALOG_H
+#define VARIANTSELECTIONDIALOG_H
+
+#include <QDialog>
+#include <QListWidget>
+#include <QTextEdit>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+
+class VariantSelectionDialog : public QDialog
+{
+
+    Q_OBJECT
+
+public:
+    VariantSelectionDialog(const QStringList& variants, QWidget* parent = nullptr, QString currentVariant = "");
+
+    QString getSelectedVariant() const;
+
+
+private slots:
+    void updateVariantDetails(const QString& variantNumber);
+    void generateVariant();
+
+
+private:
+    QListWidget* variantListWidget;
+    QTextEdit* variantDetails;
+    QPushButton* generateButton;
+    QPushButton* selectButton;
+
+    QStringList variantList;
+    QString selectedVariant;
+};
+
+#endif // VARIANTSELECTIONDIALOG_H
+
+
+
+
+
+
